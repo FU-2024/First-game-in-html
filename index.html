@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>黄金矿工小游戏</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        /* 适当调整canvas居中 */
+        .game-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        #game-canvas {
+            background: #f7e9a0;
+            border: 2px solid #bfa243;
+            border-radius: 8px;
+            margin-top: 20px;
+            height: 400px;
+        }
+        .score, .timer {
+            font-size: 22px;
+            margin: 10px;
+        }
+        #start-button {
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="game-container">
+        <h1>黄金矿工小游戏</h1>
+        <div style="margin-bottom:10px;">
+            <label for="level-select" style="font-size:18px;">选择关卡：</label>
+            <select id="level-select" style="font-size:18px;">
+                <option value="1">第1关</option>
+                <option value="2">第2关</option>
+                <option value="3">第3关</option>
+                <option value="4">第4关</option>
+                <option value="5">第5关</option>
+            </select>
+        </div>
+        <div class="score">分数: <span id="score">0</span></div>
+        <div class="timer">剩余时间: <span id="timer">60</span> 秒</div>
+        <canvas id="game-canvas" width="600" height="400"></canvas>
+        <div class="diamond" id="diamond"></div>
+        <button id="start-button" class="button">开始游戏</button>
+        <div id="game-over" style="display:none; font-size:24px; color:#bfa243; margin-top:20px;"></div>
+    </div>
+    <script>
+        // 黄金矿工核心逻辑
+        const canvas = document.getElementById('game-canvas');
+        const ctx = canvas.getContext('2d');
+        const scoreEl = document.getElementById('score');
+        const timerEl = document.getElementById('timer');
+        const startBtn = document.getElementById('start-button');
+        const gameOverEl = document.getElementById('game-over');
+        const levelSelect = document.getElementById('level-select');
+        let currentLevel = 1;
+        let unlockedLevel = 1; // 新增：已解锁的最高关卡
+
+        // 删除所有图片加载相关代码，直接定义金块类型
+        const GOLD_LIST = [
+            {r: 25, value: 100, color: '#FFD700'},    // 大金块
+            {r: 15, value: 50, color: '#DAA520'},     // 中金块
+            {r: 10, value: 20, color: '#B8860B'}      // 小金块
+        ];
+
+        // 移除图片加载检测相关代码
+        let allImagesLoaded = true; // 直接设置为true
+
+        // 关卡配置
+        const LEVEL_CONFIG = [
+            { goldCount: 6, time: 60 },
+            { goldCount: 8, time: 55 },
+            { goldCount: 10, time: 50 },
+            { goldCount: 12, time: 45 },
+            { goldCount: 14, time: 40 }
+        ];
+
+        // 初始化关卡选择状态
+        function updateLevelOptions() {
+            for (let i = 0; i < levelSelect.options.length; i++) {
+                if (i < unlockedLevel) {
+                    levelSelect.options[i].disabled = false;
+                } else {
+                    levelSelect.options[i].disabled = true;
+                }
+            }
+            // 如果当前选择大于已解锁，自动回退到最高已解锁关卡
+            if (parseInt(levelSelect.value) > unlockedLevel) {
+                levelSelect.value = unlockedLevel;
+            }
+        }
+        updateLevelOptions();
+
+        // 游戏参数
+        let golds = [];
+        let score = 0;
+        let timer = 60;
+        let gameRunning = false;
+        let intervalId = null;
+        let hook = null;
+        let hookState = 'rotate'; // rotate, extend, retract, catch
+        let hookAngle = Math.PI / 2;
+        let hookLen = 60;
+        let hookSpeed = 3;
+        let caughtGold = null;
+        let hookDir = 1; // 新增：钩子旋转方向，1为顺时针，-1为逆时针
+
+        function resetGame() {
+            score = 0;
+            // 读取当前关卡
+            currentLevel = parseInt(levelSelect.value);
+            let config = LEVEL_CONFIG[currentLevel - 1];
+            timer = config.time;
+            golds = [];
+            hookAngle = Math.PI / 2;
+            hookLen = 60;
+            hookState = 'rotate';
+            hookDir = 1; // 强制重置旋转方向
+            caughtGold = null;
+            gameRunning = true;
+            gameOverEl.style.display = 'none';
+            scoreEl.textContent = score;
+            timerEl.textContent = timer;
+            // 禁用关卡选择
+            levelSelect.disabled = true;
+            // 优化金块生成逻辑
+            for (let i = 0; i < config.goldCount; i++) {
+                let g = GOLD_LIST[Math.floor(Math.random() * GOLD_LIST.length)];
+                let x, y, safe = false;
+                let attempts = 0;
+                while (!safe && attempts < 100) {
+                    attempts++;
+                    x = Math.random() * (canvas.width - 100) + 50;
+                    y = Math.random() * (canvas.height - 200) + 180;
+                    safe = true;
+                    for (let gold of golds) {
+                        let dx = gold.x - x, dy = gold.y - y;
+                        let minDist = gold.r + g.r + 20;
+                        if (Math.sqrt(dx*dx + dy*dy) < minDist) {
+                            safe = false;
+                            break;
+                        }
+                    }
+                }
+                if (safe) {
+                    golds.push({
+                        x, y,
+                        r: g.r,
+                        value: g.value,
+                        color: g.color,
+                        caught: false
+                    });
+                }
+            }
+        }
+        function drawGolds() {
+            for (let gold of golds) {
+                if (!gold.caught) {
+                    // 使用圆形替代金块图片
+                    ctx.beginPath();
+                    ctx.arc(gold.x, gold.y, gold.r, 0, Math.PI * 2);
+                    ctx.fillStyle = gold.color;
+                    ctx.fill();
+                    ctx.strokeStyle = '#000';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+            }
+        }
+        function drawHook() {
+            const cx = canvas.width / 2, cy = 60;
+            let ex = cx + hookLen * Math.cos(hookAngle);
+            let ey = cy + hookLen * Math.sin(hookAngle);
+            
+            // 绘制绳子
+            ctx.save();
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(ex, ey);
+            ctx.stroke();
+            ctx.restore();
+
+            // 绘制钩子（三角形）
+            ctx.save();
+            ctx.translate(ex, ey);
+            ctx.rotate(hookAngle + Math.PI / 2);
+            ctx.beginPath();
+            ctx.moveTo(0, -15);
+            ctx.lineTo(-10, 5);
+            ctx.lineTo(10, 5);
+            ctx.closePath();
+            ctx.fillStyle = '#666';
+            ctx.fill();
+            ctx.restore();
+
+            // 如果抓到金块
+            if (caughtGold) {
+                ctx.beginPath();
+                ctx.arc(ex, ey + caughtGold.r/2, caughtGold.r, 0, Math.PI * 2);
+                ctx.fillStyle = caughtGold.color;
+                ctx.fill();
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+        }
+           
+        function updateHook() {
+            const cx = canvas.width / 2, cy = 60;
+            if (hookState === 'rotate') {
+                // 确保 hookDir 不为 0
+                if (hookDir === 0) hookDir = 1;
+                // 加快钩子摆动速度
+                hookAngle += 0.01 * hookDir;
+                if (hookAngle >= Math.PI - 0.2) {
+                    hookAngle = Math.PI - 0.2;
+                    hookDir = -1;
+                }
+                if (hookAngle <= 0.2) {
+                    hookAngle = 0.2;
+                    hookDir = 1;
+                }
+            } else if (hookState === 'extend') {
+                hookLen += hookSpeed;
+                let ex = cx + hookLen * Math.cos(hookAngle);
+                let ey = cy + hookLen * Math.sin(hookAngle);
+                for (let gold of golds) {
+                    if (!gold.caught) {
+                        let dx = gold.x - ex, dy = gold.y - ey;
+                        let dist = Math.sqrt(dx*dx + dy*dy);
+                        // 增大碰撞范围
+                        if (dist < gold.r + 15) {
+                            gold.caught = true;
+                            caughtGold = gold;
+                            hookState = 'retract';
+                            // 收绳子速度进一步减缓
+                            hookSpeed = Math.max(0.5, 3 - gold.r/12);
+                            return;
+                        }
+                    }
+                }
+                // 到达边界
+                if (ex < 0 || ex > canvas.width || ey > canvas.height) {
+                    hookState = 'retract';
+                }
+            } else if (hookState === 'retract') {
+                hookLen -= hookSpeed;
+                if (hookLen <= 60) {
+                    hookLen = 60;
+                    hookState = 'rotate';
+                    if (caughtGold) {
+                        score += caughtGold.value;
+                        scoreEl.textContent = score;
+                        // 移除金块
+                        golds = golds.filter(g => g !== caughtGold);
+                        caughtGold = null;
+                        hookSpeed = 3; // 恢复默认速度
+                    }
+                }
+            }
+        }
+
+        function draw() {
+            if (!allImagesLoaded) return;
+            
+            // 清空画布，使用纯色背景
+            ctx.fillStyle = '#f7e9a0';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // 绘制调试信息和游戏元素
+            drawGolds();
+            drawHook();
+            
+        }
+
+        function gameLoop() {
+            if (!gameRunning) return;
+            updateHook();
+            draw();
+            if (golds.length === 0) {
+                endGame(true);
+            }
+        }
+
+        function startGame() {
+            resetGame();
+            startBtn.disabled = true;
+            intervalId = setInterval(() => {
+                if (!gameRunning) return;
+                timer--;
+                timerEl.textContent = timer;
+                if (timer <= 0) {
+                    endGame(false);
+                }
+            }, 1000);
+            function frame() {
+                gameLoop();
+                if (gameRunning) requestAnimationFrame(frame);
+            }
+            requestAnimationFrame(frame);
+        }
+
+        function endGame(win) {
+            gameRunning = false;
+            clearInterval(intervalId);
+            startBtn.disabled = false;
+            gameOverEl.style.display = 'block';
+            gameOverEl.textContent = win ? `恭喜通关！最终得分：${score}` : `游戏结束！最终得分：${score}`;
+            // 游戏结束后允许切换关卡
+            levelSelect.disabled = false;
+            // 通关解锁下一关
+            if (win && currentLevel === unlockedLevel && unlockedLevel < 5) {
+                unlockedLevel++;
+                updateLevelOptions();
+            }
+        }
+
+        // 控制钩子
+        canvas.addEventListener('click', function() {
+            console.log('Canvas clicked. gameRunning:', gameRunning, 'hookState:', hookState); // 调试日志
+            if (!gameRunning) return;
+            if (hookState === 'rotate') {
+                hookState = 'extend';
+                console.log('Hook extended'); // 调试日志
+            }
+        });
+
+        startBtn.onclick = function() {
+            if (startBtn.disabled) return;
+            startGame();
+        };
+
+        // 页面加载后立即启用按钮，并允许切换关卡
+        startBtn.disabled = false;
+        levelSelect.disabled = false;
+
+        // 关卡切换时重置分数和时间显示（仅允许选择已解锁关卡）
+        levelSelect.onchange = function() {
+            scoreEl.textContent = 0;
+            timerEl.textContent = LEVEL_CONFIG[parseInt(levelSelect.value) - 1].time;
+        };
+    </script>
+</body>
+</html>
